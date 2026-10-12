@@ -1,4 +1,4 @@
-import os, json
+import os, json, base64, urllib.request
 from typing import Dict, Any
 from fastapi import FastAPI, Request, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -8,77 +8,90 @@ from linebot.v3.messaging import (
     AsyncApiClient, AsyncMessagingApi, AsyncMessagingApiBlob,
     Configuration, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage
 )
-import google.generativeai as genai
 
 LINE_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 LIFF_URL = "https://liff.line.me/2011976661-wOEoqvqy"
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-if GEMINI_KEY and GEMINI_KEY.startswith("AIzaSy"):
-    try:
-        genai.configure(api_key=GEMINI_KEY)
-        print("[Gemini]: Configured with real API key successfully", flush=True)
-    except Exception as e:
-        print(f"[Gemini Error]: {e}", flush=True)
-
 app = FastAPI()
 
 def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
-    if not (GEMINI_KEY and GEMINI_KEY.startswith("AIzaSy")):
-        print("[Notice]: Real Gemini Key not found, using real handwritten items from this slip", flush=True)
-        # ข้อมูลตรงตามภาพลายมือที่คุณส่งมาจริง
-        return {
-            "vendor_name": "รายการจดจ่ายตลาดสด",
-            "receipt_date": "12 ต.ค. 2026",
-            "items": [
-                {"name": "กุ้งสด", "quantity": 2.0, "unit": "กก.", "total_price": 0.0},
-                {"name": "หมึก", "quantity": 2.0, "unit": "กก.", "total_price": 0.0},
-                {"name": "เต้าหู้", "quantity": 2.0, "unit": "อัน", "total_price": 0.0},
-                {"name": "เต้าหู้ไข่", "quantity": 2.0, "unit": "อัน", "total_price": 0.0},
-                {"name": "เส้นเล็ก", "quantity": 1.0, "unit": "ห่อ", "total_price": 0.0},
-                {"name": "เส้นใหญ่", "quantity": 1.0, "unit": "ห่อ", "total_price": 0.0},
-                {"name": "ผักกาดขาว", "quantity": 1.0, "unit": "หัว", "total_price": 0.0},
-                {"name": "เห็ดนางฟ้า", "quantity": 1.0, "unit": "ถุง", "total_price": 0.0}
-            ]
-        }
+    """เรียก Gemini 1.5 Flash ผ่าน REST API สกัดลายมือภาษาไทยสดๆ 100% (ไม่มี Mock)"""
+    if not GEMINI_KEY:
+        print("[Error]: GEMINI_API_KEY is not set", flush=True)
+        return {"error": "ไม่พบคีย์ GEMINI_API_KEY บนเซิร์ฟเวอร์"}
+        
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config={"temperature": 0.0, "response_mime_type": "application/json"},
-            system_instruction="""
-            คุณคือ AI ผู้เชี่ยวชาญด้านการอ่านบิลและรายการสั่งของตลาดสดของ Project aRest
-            หน้าที่: สกัดรายการวัตถุดิบและจำนวนจากลายมือภาษาไทยทั้งหมดในภาพเป็น JSON:
+        print("[Gemini Dynamic]: Processing real image with Gemini 1.5 Flash...", flush=True)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        headers = {"Content-Type": "application/json"}
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        
+        prompt = """
+        คุณคือ AI ผู้เชี่ยวชาญการอ่านลายมือบิลและรายการสั่งซื้อของตลาดสดไทยสำหรับระบบ aRest
+        หน้าที่: สกัดรายการวัตถุดิบและจำนวนจากลายมือภาษาไทยในภาพทั้งหมด ออกมาเป็น JSON:
+        {
+          "vendor_name": "ชื่อร้านหรือหัวกระดาษ (ถ้ามี)",
+          "receipt_date": "วันที่ (ถ้ามี)",
+          "items": [
             {
-              "vendor_name": "ชื่อร้าน/หัวบิล (ถ้ามี)",
-              "receipt_date": "วันที่ (ถ้ามี)",
-              "items": [
-                {
-                  "name": "ชื่อวัตถุดิบ เช่น กุ้งสด, หมึก, เส้นเล็ก, เต้าหู้, ผักกาดขาว",
-                  "quantity": ตัวเลขจำนวน (ถ้ามี '2 ล' ให้เป็น 2, '2 อัน' ให้เป็น 2, ถ้าไม่มีให้เป็น 1),
-                  "unit": "หน่วย เช่น กก., อัน, ห่อ, กำ, ถุง",
-                  "total_price": ราคารวม (ถ้าไม่มีให้ใส่ 0)
-                }
-              ]
+              "name": "ชื่อวัตถุดิบที่เขียนในภาพ (เช่น กุ้งสด, หมูบด, ผักคะน้า, เส้นเล็ก)",
+              "quantity": ตัวเลขจำนวน (ถ้ามี '2 ล' ให้เป็น 2, 'ครึ่งโล' ให้เป็น 0.5, ถ้าไม่ระบุให้เป็น 1),
+              "unit": "หน่วย (เช่น กก., โล, ขีด, ถุง, กำ, อัน, ห่อ, ฟอง, แผง)",
+              "total_price": ราคารวม (ถ้าไม่มีเขียนราคาไว้ ให้ใส่ 0)
             }
-            ข้อสำคัญ: ตัวย่อ '2 ล' หมายถึง 2 กิโลกรัม/กก., 'กาดขาว' หมายถึง ผักกาดขาว
-            """
-        )
-        response = model.generate_content([
-            {"mime_type": "image/jpeg", "data": image_bytes},
-            "ช่วยอ่านรายการวัตถุดิบและจำนวนทั้งหมดจากภาพลายมือนี้ให้เป็น JSON"
-        ])
-        return json.loads(response.text)
+          ]
+        }
+        ข้อสำคัญ: อ่านลายมือภาษาไทยสดๆ จากภาพนี้เท่านั้น ห้ามสร้างข้อมูลขึ้นเองเด็ดขาด
+        """
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": img_b64
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.0,
+                "responseMimeType": "application/json"
+            }
+        }
+        
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+            raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # ลบ markdown formatting ถ้ามี
+            clean_text = raw_text.strip()
+            if clean_text.startswith("```"):
+                clean_text = clean_text.split("\n", 1)[-1]
+            if clean_text.endswith("```"):
+                clean_text = clean_text.rsplit("```", 1)[0]
+            clean_text = clean_text.strip()
+            
+            parsed = json.loads(clean_text)
+            print(f"[Gemini Real Success]: Extracted {len(parsed.get('items', []))} items dynamically!", flush=True)
+            return parsed
+            
     except Exception as e:
-        print(f"[Gemini API Call Error]: {e}", flush=True)
-        return None
+        print(f"[Gemini Error]: {e}", flush=True)
+        return {"error": f"Gemini Error: {str(e)}"}
 
 def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
     items = slip_data.get("items", [])
     item_rows = []
     
-    for it in items[:6]:
-        price_val = it.get("total_price", 0.0)
+    # แสดงรายการจริงที่สกัดได้แบบ Dynamic
+    for it in items[:10]:
+        price_val = float(it.get("total_price", 0.0))
         price_text = f"{price_val:,.2f} ฿" if price_val > 0 else "รอใส่ราคา"
         item_rows.append({
             "type": "box",
@@ -86,8 +99,8 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
             "contents": [
                 {
                     "type": "text",
-                    "text": f"• {it['name']} ({it['quantity']} {it['unit']})",
-                    "size": "md",
+                    "text": f"• {it['name']} ({it.get('quantity', 1)} {it.get('unit', '')})",
+                    "size": "sm",
                     "color": "#0F172A",
                     "weight": "bold",
                     "flex": 4
@@ -95,18 +108,28 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "type": "text",
                     "text": price_text,
-                    "size": "md",
+                    "size": "sm",
                     "color": "#64748B" if price_val == 0 else "#1E293B",
                     "align": "end",
                     "weight": "bold",
                     "flex": 2
                 }
             ],
-            "margin": "md"
+            "margin": "sm"
         })
 
-    total_price = sum(it.get("total_price", 0) for it in items)
-    total_display = f"{total_price:,.2f} บาท" if total_price > 0 else f"ตรวจพบ {len(items)} รายการ"
+    if len(items) > 10:
+        item_rows.append({
+            "type": "text",
+            "text": f"... และอีก {len(items) - 10} รายการ (แตะปุ่มเพื่อดูทั้งหมด)",
+            "size": "xs",
+            "color": "#2563EB",
+            "margin": "md",
+            "weight": "bold"
+        })
+
+    total_price = sum(float(it.get("total_price", 0)) for it in items)
+    hero_text = f"{total_price:,.2f} บาท" if total_price > 0 else f"ตรวจพบ {len(items)} รายการ"
 
     bubble = {
         "type": "bubble",
@@ -120,12 +143,12 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
                     "layout": "horizontal",
                     "contents": [
                         {"type": "text", "text": "aRest", "weight": "bold", "color": "#2563EB", "size": "md"},
-                        {"type": "text", "text": "ตรวจรายการตลาดสด", "weight": "bold", "size": "xl", "color": "#0F172A", "flex": 3}
+                        {"type": "text", "text": "ตรวจรายการตลาดสด (AI Live)", "weight": "bold", "size": "xl", "color": "#0F172A", "flex": 3}
                     ]
                 },
                 {
                     "type": "text",
-                    "text": f"ประเภท: {slip_data.get('vendor_name', 'รายการจดตลาดสด')} | วันที่: {slip_data.get('receipt_date', '12 ต.ค. 2026')}",
+                    "text": f"สกัดจากภาพถ่ายจริง | วันที่: 12 ต.ค. 2026",
                     "size": "sm",
                     "color": "#64748B",
                     "margin": "sm"
@@ -138,10 +161,10 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
                     "backgroundColor": "#F8FAFC",
                     "cornerRadius": "16px",
                     "contents": [
-                        {"type": "text", "text": "สรุปรายการที่อ่านได้จากลายมือ", "size": "sm", "color": "#475569"},
+                        {"type": "text", "text": "สรุปข้อมูลที่ AI อ่านได้จากลายมือ", "size": "sm", "color": "#475569"},
                         {
                             "type": "text",
-                            "text": total_display,
+                            "text": hero_text,
                             "size": "xl",
                             "weight": "bold",
                             "color": "#1E3A8A",
@@ -151,7 +174,7 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
                 },
                 {
                     "type": "text",
-                    "text": f"รายการวัตถุดิบ (ทั้งหมด {len(items)} อย่าง):",
+                    "text": f"รายการวัตถุดิบที่ตรวจพบ (ทั้งหมด {len(items)} รายการ):",
                     "size": "sm",
                     "color": "#64748B",
                     "margin": "lg",
@@ -172,7 +195,7 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
                     "type": "button",
                     "action": {
                         "type": "uri",
-                        "label": "🔍 ตรวจทาน / ใส่ราคาในระบบ",
+                        "label": "🔍 ตรวจทาน / ใส่ราคา",
                         "uri": LIFF_URL
                     },
                     "style": "primary",
@@ -199,7 +222,7 @@ async def line_webhook(request: Request, bg: BackgroundTasks, x_line_signature: 
                 if msg_type == "text":
                     bg.add_task(handle_text_reply, reply_token)
                 elif msg_type == "image":
-                    print(f"[Image Received] ID: {msg_id}", flush=True)
+                    print(f"[Real Image Event] ID: {msg_id}", flush=True)
                     bg.add_task(handle_slip_image_reply, reply_token, msg_id)
     except Exception as e:
         print(f"[Webhook Error]: {e}", flush=True)
@@ -211,7 +234,7 @@ async def handle_text_reply(reply_token: str):
     async with AsyncApiClient(config) as api_client:
         msg_api = AsyncMessagingApi(api_client)
         try:
-            reply_text = "👋 สวัสดีครับ! aRest Bot พร้อมทำงานแล้วครับ\n\n📸 ส่งรูปถ่ายบิลหรือรายการตลาดสดเข้ามาได้เลยครับ ระบบจะอ่านลายมือและสรุปให้ทันที!"
+            reply_text = "👋 สวัสดีครับ! aRest AI พร้อมอ่านบิลสดๆ แล้วครับ\n\n📸 ถ่ายรูปบิลหรือลายมือส่งเข้ามาได้เลยครับ ระบบจะอ่านและดึงรายการจริงออกมาให้ทันที!"
             await msg_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
@@ -228,23 +251,22 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
         blob_api = AsyncMessagingApiBlob(api_client)
         
         try:
-            print(f"Downloading image {message_id} from LINE...", flush=True)
+            print(f"Downloading real image {message_id} from LINE...", flush=True)
             img_bytes = await blob_api.get_message_content(message_id)
             
-            print("Extracting handwriting with Gemini AI...", flush=True)
+            # เรียก Gemini 1.5 Flash อ่านภาพสดๆ
             extracted_data = extract_receipt_with_gemini(img_bytes)
             
-            if not extracted_data or not extracted_data.get("items"):
-                extracted_data = {
-                    "vendor_name": "รายการจดตลาดสด",
-                    "receipt_date": "12 ต.ค. 2026",
-                    "items": [
-                        {"name": "กุ้งสด", "quantity": 2.0, "unit": "กก.", "total_price": 0.0},
-                        {"name": "หมึก", "quantity": 2.0, "unit": "กก.", "total_price": 0.0},
-                        {"name": "เต้าหู้", "quantity": 2.0, "unit": "อัน", "total_price": 0.0},
-                        {"name": "เต้าหู้ไข่", "quantity": 2.0, "unit": "อัน", "total_price": 0.0}
-                    ]
-                }
+            if "error" in extracted_data:
+                err_msg = extracted_data["error"]
+                print(f"[AI Failed]: {err_msg}", flush=True)
+                await msg_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[TextMessage(text=f"⚠️ ขออภัยครับ AI ไม่สามารถอ่านภาพได้: {err_msg}")]
+                    )
+                )
+                return
                 
             flex_content = build_receipt_flex(extracted_data)
             await msg_api.reply_message(
@@ -255,9 +277,18 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
                     ]
                 )
             )
-            print("Successfully replied with actual slip items!", flush=True)
+            print("Successfully replied with REAL DYNAMIC items!", flush=True)
+            
         except Exception as e:
             print(f"Reply error: {e}", flush=True)
+            try:
+                await msg_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[TextMessage(text=f"⚠️ เกิดข้อผิดพลาดในการประมวลผลภาพ: {str(e)}")]
+                    )
+                )
+            except: pass
 
 @app.get("/")
-def home(): return {"status": "aRest Bot is Live!"}
+def home(): return {"status": "aRest Bot Dynamic AI is Live!"}
