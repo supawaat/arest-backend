@@ -18,8 +18,12 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 LIFF_URL = os.getenv("LIFF_URL", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+USE_GEMINI = bool(GEMINI_KEY and GEMINI_KEY.startswith("AIzaSy"))
+if USE_GEMINI:
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+    except Exception as e:
+        print(f"GenAI configure error: {e}", flush=True)
 
 app = FastAPI()
 CACHE_DIR = "/tmp/slips"
@@ -61,7 +65,8 @@ def render_eslip(data: Dict[str, Any], out_path: str):
     img.save(out_path, quality=95)
 
 def extract_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
-    if not GEMINI_KEY: return None
+    if not USE_GEMINI:
+        return None
     try:
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
@@ -71,7 +76,7 @@ def extract_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
         response = model.generate_content([
             {"mime_type": "image/jpeg", "data": image_bytes},
             "Extract items from receipt."
-        ])
+        ], request_options={"timeout": 15})
         return json.loads(response.text)
     except Exception as e:
         print(f"[Gemini Error]: {e}", flush=True)
@@ -83,9 +88,6 @@ async def line_webhook(request: Request, bg: BackgroundTasks, x_line_signature: 
     host = request.headers.get("host", "arest-backend.onrender.com")
     https_host_url = f"https://{host}"
     
-    print(f"[Webhook Event Received] Body length: {len(body)}", flush=True)
-    
-    # 1. ดึงเหตุการณ์จาก LINE
     try:
         payload = json.loads(body)
         for ev in payload.get("events", []):
@@ -94,13 +96,9 @@ async def line_webhook(request: Request, bg: BackgroundTasks, x_line_signature: 
             msg_type = msg_obj.get("type")
             msg_id = msg_obj.get("id")
             
-            # ตอบกลับข้อความตัวหนังสือ
             if msg_type == "text":
                 text_content = msg_obj.get("text", "")
-                print(f"[Text Message]: {text_content}", flush=True)
                 bg.add_task(handle_text_reply, reply_token, text_content)
-                
-            # ตอบกลับรูปภาพบิล
             elif msg_type == "image":
                 print(f"[Image Message] ID: {msg_id}", flush=True)
                 bg.add_task(handle_slip_image, reply_token, msg_id, https_host_url)
@@ -114,15 +112,13 @@ async def handle_text_reply(reply_token: str, user_text: str):
     async with AsyncApiClient(config) as api_client:
         msg_api = AsyncMessagingApi(api_client)
         try:
-            print(f"Replying to text with token: {reply_token[:10]}...", flush=True)
-            reply_text = "👋 สวัสดีครับ! aRest Bot พร้อมทำงานแล้วครับ\n\n📸 กรุณาส่งรูปถ่ายบิลตลาดสดเข้ามาได้เลยครับ ระบบจะอ่านบิลและสรุปต้นทุนให้ทันที!"
+            reply_text = "👋 สวัสดีครับ! aRest Bot พร้อมทำงานแล้วครับ\n\n📸 ส่งรูปถ่ายบิลตลาดสดเข้ามาได้เลยครับ ระบบจะวิเคราะห์ต้นทุนให้ทันที!"
             await msg_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
                     messages=[TextMessage(text=reply_text)]
                 )
             )
-            print("Text reply sent successfully!", flush=True)
         except Exception as e:
             print(f"Failed to reply text: {e}", flush=True)
 
@@ -133,7 +129,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
         blob_api = AsyncMessagingApiBlob(api_client)
         
         try:
-            print(f"Downloading image {message_id} from LINE...", flush=True)
+            print(f"Downloading image {message_id}...", flush=True)
             img_bytes = await blob_api.get_message_content(message_id)
             gemini_result = extract_with_gemini(img_bytes)
             
@@ -150,7 +146,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                         "inc": False, "pct": 0.0
                     })
                 slip_data = {
-                    "store": "aRest Demo Store",
+                    "store": "aRest Live Store",
                     "date": gemini_result.get("receipt_date") or "12 Oct 2026",
                     "vendor": gemini_result.get("vendor_name") or "Market Slip",
                     "total": gemini_result.get("total_amount_claimed") or sum(x["total"] for x in items_list),
@@ -162,10 +158,10 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                     "date": "12 Oct 2026", "vendor": "Wet Market Slip",
                     "total": 1420.00,
                     "items": [
-                        {"name": "Pork Belly", "qty": 5.0, "unit": "kg", "rate": 140.0, "total": 700.0, "inc": True, "pct": 16.7},
-                        {"name": "Pork Collar", "qty": 5.0, "unit": "kg", "rate": 135.0, "total": 675.0, "inc": False, "pct": 0},
-                        {"name": "Red Chili", "qty": 0.2, "unit": "kg", "rate": 150.0, "total": 30.0, "inc": False, "pct": 0},
-                        {"name": "Holy Basil", "qty": 3.0, "unit": "pack", "rate": 5.0, "total": 15.0, "inc": False, "pct": 0}
+                        {"name": "Pork Belly (หมูสามชั้น)", "qty": 5.0, "unit": "kg", "rate": 140.0, "total": 700.0, "inc": True, "pct": 16.7},
+                        {"name": "Pork Collar (สันคอ)", "qty": 5.0, "unit": "kg", "rate": 135.0, "total": 675.0, "inc": False, "pct": 0},
+                        {"name": "Red Chili (พริกจินดา)", "qty": 0.2, "unit": "kg", "rate": 150.0, "total": 30.0, "inc": False, "pct": 0},
+                        {"name": "Holy Basil (ใบกะเพรา)", "qty": 3.0, "unit": "pack", "rate": 5.0, "total": 15.0, "inc": False, "pct": 0}
                     ]
                 }
             
@@ -173,7 +169,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
             png_path = os.path.join(CACHE_DIR, png_name)
             render_eslip(slip_data, png_path)
             img_url = f"{host_url}/slips/{png_name}"
-            print(f"Generated E-Slip URL: {img_url}", flush=True)
+            print(f"Replying image to LINE: {img_url}", flush=True)
             
             card = {
                 "type": "bubble", "size": "mega",
@@ -191,7 +187,8 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                         {
                             "type": "button",
                             "action": {"type": "uri", "label": "🔍 แตะตรวจทานบิล (ตัวหนังสือใหญ่)", "uri": LIFF_URL},
-                            "style": "primary", "color": "#16A34A", "height": "md"
+                            "style": "primary", "color": "#16A34A",
+                            "height": "md"
                         }
                     ]
                 }
@@ -206,10 +203,10 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                     ]
                 )
             )
-            print("Successfully replied image to LINE user!", flush=True)
+            print("Successfully sent slip to user!", flush=True)
             
         except Exception as e:
-            print(f"Error in handle_slip_image: {e}", flush=True)
+            print(f"Error sending image reply: {e}", flush=True)
             await msg_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
