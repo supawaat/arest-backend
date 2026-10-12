@@ -1,6 +1,7 @@
-import os, json, base64, urllib.request, urllib.error, urllib.parse
+import os, json, base64, urllib.request, urllib.error
 from typing import Dict, Any
 from fastapi import FastAPI, Request, Header, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from linebot.v3 import WebhookParser
@@ -15,6 +16,24 @@ BASE_LIFF_URL = "https://liff.line.me/2011976661-wOEoqvqy"
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 app = FastAPI()
+
+# อนุญาตให้หน้าเว็บ LIFF (GitHub Pages) เรียกดึงข้อมูลได้
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# หน่วยความจำเก็บข้อมูลบิลแบบ Real-time
+SLIP_CACHE: Dict[str, Any] = {}
+
+@app.get("/api/slip/{slip_id}")
+def get_slip(slip_id: str):
+    if slip_id in SLIP_CACHE:
+        return SLIP_CACHE[slip_id]
+    return {"status": "not_found", "items": []}
 
 def get_available_gemini_models() -> list:
     if not GEMINI_KEY:
@@ -55,10 +74,10 @@ def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
       "receipt_date": "12 ต.ค. 2026",
       "items": [
         {
-          "name": "ชื่อวัตถุดิบ",
-          "quantity": ตัวเลขจำนวน (ถ้ามี '2 กก.' ให้เป็น 2, '1/2 กก.' ให้เป็น 0.5),
+          "name": "ชื่อวัตถุดิบ (เช่น หมูสับ, น้ำปลา, ขิง, ไข่ไก่, คะน้า, พริกสด)",
+          "quantity": ตัวเลขจำนวน (ถ้ามี '2 กก.' ให้เป็น 2, '1/2 กก.' ให้เป็น 0.5, '1 ขวด' ให้เป็น 1),
           "unit": "หน่วย (เช่น กก., ขวด, แผง, ถุง, กำ, ลูก)",
-          "total_price": ราคารวมที่เขียนไว้ท้ายบรรทัด (ถ้าไม่มีให้ใส่ 0)
+          "total_price": ราคารวมที่เขียนไว้ท้ายบรรทัด (เช่น 190, 58, 40, 130, ถ้าไม่มีให้ใส่ 0)
         }
       ]
     }
@@ -167,10 +186,11 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
             img_bytes = await blob_api.get_message_content(message_id)
             extracted_data = extract_receipt_with_gemini(img_bytes)
             
-            # ส่งข้อมูลจริงไปที่หน้า LIFF ผ่าน URL Parameter
-            compact_json = json.dumps(extracted_data, ensure_ascii=False)
-            encoded_d = urllib.parse.quote(compact_json)
-            dynamic_liff_url = f"{BASE_LIFF_URL}?d={encoded_d}"
+            # 1. บันทึกข้อมูลลงใน Cache ของเซิร์ฟเวอร์
+            SLIP_CACHE[message_id] = extracted_data
+            
+            # 2. ส่งลิงก์ที่มีรหัส ID สั้นๆ ไปให้ LINE (ยาวเพียง 60 ตัวอักษร ไม่เกินโควตา 1,000 แน่นอน)
+            dynamic_liff_url = f"{BASE_LIFF_URL}?id={message_id}"
             
             flex_content = build_receipt_flex(extracted_data, dynamic_liff_url)
             await msg_api.reply_message(
