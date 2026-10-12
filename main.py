@@ -191,7 +191,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                         {
                             "type": "button",
                             "action": {"type": "uri", "label": "🔍 แตะตรวจทานบิล (ตัวหนังสือใหญ่)", "uri": LIFF_URL},
-                            "style": "primary", "color": "#16A34A", "height": "tall"
+                            "style": "primary", "color": "#16A34A", "height": "md"
                         }
                     ]
                 }
