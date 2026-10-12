@@ -16,75 +16,107 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 app = FastAPI()
 
+def get_available_gemini_models() -> list:
+    """ดึงรายชื่อโมเดล Flash ที่เปิดใช้งานอยู่จริงใน Google Project ของคุณ"""
+    if not GEMINI_KEY:
+        return ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            active_models = []
+            for m in data.get("models", []):
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    name = m["name"].replace("models/", "")
+                    active_models.append(name)
+            
+            # ลำดับโมเดล Flash รุ่นใหม่ที่ต้องการ
+            ordered = []
+            for pref in ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash"]:
+                if pref in active_models:
+                    ordered.append(pref)
+            for m in active_models:
+                if "flash" in m and m not in ordered:
+                    ordered.append(m)
+            return ordered if ordered else active_models
+    except Exception as e:
+        print(f"[ListModels Error]: {e}", flush=True)
+        return ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]
+
 def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
     if not GEMINI_KEY:
         return {"error": "ไม่พบคีย์ GEMINI_API_KEY บนเซิร์ฟเวอร์"}
         
-    try:
-        print("[Gemini REST]: Calling Gemini 1.5 Flash...", flush=True)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-        headers = {"Content-Type": "application/json"}
-        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        
-        prompt = """
-        คุณคือ AI ผู้เชี่ยวชาญการอ่านลายมือบิลและรายการสั่งซื้อของตลาดสดไทย
-        หน้าที่: สกัดรายการวัตถุดิบ จำนวน และราคาจากลายมือภาษาไทยทั้งหมดในภาพเป็น JSON:
+    candidate_models = get_available_gemini_models()
+    print(f"[Available Models]: {candidate_models[:5]}", flush=True)
+    
+    headers = {"Content-Type": "application/json"}
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    
+    prompt = """
+    คุณคือ AI ผู้เชี่ยวชาญการอ่านลายมือบิลและรายการสั่งซื้อของตลาดสดไทย
+    หน้าที่: สกัดรายการวัตถุดิบ จำนวน และราคาจากลายมือภาษาไทยทั้งหมดในภาพเป็น JSON:
+    {
+      "vendor_name": "รายการจดตลาดสด",
+      "receipt_date": "12 ต.ค. 2026",
+      "items": [
         {
-          "vendor_name": "รายการจดตลาดสด",
-          "receipt_date": "12 ต.ค. 2026",
-          "items": [
-            {
-              "name": "ชื่อวัตถุดิบ (เช่น หมูสับ, น้ำปลา, ขิง, ไข่ไก่, คะน้า)",
-              "quantity": ตัวเลขจำนวน (ถ้ามี '2 กก.' ให้เป็น 2, '1/2 กก.' ให้เป็น 0.5, '1 ขวด' ให้เป็น 1),
-              "unit": "หน่วย (เช่น กก., ขวด, แผง, ถุง, กำ, ลูก)",
-              "total_price": ราคารวมที่เขียนไว้ท้ายบรรทัด (เช่น 190, 58, 40, 130, ถ้าไม่มีให้ใส่ 0)
-            }
-          ]
+          "name": "ชื่อวัตถุดิบ (เช่น หมูสับ, น้ำปลา, ขิง, ไข่ไก่, คะน้า, พริกสด)",
+          "quantity": ตัวเลขจำนวน (ถ้ามี '2 กก.' ให้เป็น 2, '1/2 กก.' ให้เป็น 0.5, '1 ขวด' ให้เป็น 1),
+          "unit": "หน่วย (เช่น กก., ขวด, แผง, ถุง, กำ, ลูก)",
+          "total_price": ราคารวมที่เขียนไว้ท้ายบรรทัด (เช่น 190, 58, 40, 130, ถ้าไม่มีให้ใส่ 0)
         }
-        ข้อสำคัญ: อ่านลายมือจากภาพจริงทั้งหมด ทั้งฝั่งซ้ายและฝั่งขวา!
-        """
-        
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}}
-                ]
-            }],
-            "generationConfig": {
-                "temperature": 0.0,
-                "responseMimeType": "application/json"
-            }
+      ]
+    }
+    ข้อสำคัญ: อ่านลายมือจากภาพจริงทั้งหมด ทั้งฝั่งซ้ายและฝั่งขวา!
+    """
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json"
         }
-        
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            res_json = json.loads(resp.read().decode("utf-8"))
-            raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
-            
-            clean_text = raw_text.strip()
-            if clean_text.startswith("```"):
-                clean_text = clean_text.split("\n", 1)[-1]
-            if clean_text.endswith("```"):
-                clean_text = clean_text.rsplit("```", 1)[0]
-            clean_text = clean_text.strip()
-            
-            parsed = json.loads(clean_text)
-            print(f"[Gemini Real Success]: Extracted {len(parsed.get('items', []))} items dynamically!", flush=True)
-            return parsed
-            
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8")
-        print(f"[Google HTTP Error {e.code}]: {err_body}", flush=True)
+    }
+    
+    last_error = None
+    # วนลูปทดสอบโมเดลที่ใช้งานได้จริง
+    for model_name in candidate_models[:4]:
         try:
-            err_json = json.loads(err_body)
-            msg = err_json.get("error", {}).get("message", err_body)
-            return {"error": f"Google {e.code}: {msg}"}
-        except:
-            return {"error": f"Google {e.code}: {err_body}"}
-    except Exception as e:
-        print(f"[Gemini Error]: {e}", flush=True)
-        return {"error": f"Gemini Error: {str(e)}"}
+            print(f"[Gemini REST]: Trying active model '{model_name}'...", flush=True)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_KEY}"
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                
+                clean_text = raw_text.strip()
+                if clean_text.startswith("```"):
+                    clean_text = clean_text.split("\n", 1)[-1]
+                if clean_text.endswith("```"):
+                    clean_text = clean_text.rsplit("```", 1)[0]
+                clean_text = clean_text.strip()
+                
+                parsed = json.loads(clean_text)
+                print(f"[Gemini Success with {model_name}]: Extracted {len(parsed.get('items', []))} items dynamically!", flush=True)
+                return parsed
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8")
+            print(f"[{model_name} HTTP {e.code}]: {err_body}", flush=True)
+            last_error = f"{model_name}: {err_body}"
+        except Exception as e:
+            print(f"[{model_name} Error]: {e}", flush=True)
+            last_error = str(e)
+            
+    return {"error": f"Google Error: {last_error}"}
 
 def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
     items = slip_data.get("items", [])
@@ -262,7 +294,7 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
                 await msg_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=reply_token,
-                        messages=[TextMessage(text=f"⚠️ {err_msg}")]
+                        messages=[TextMessage(text=f"⚠️ ขออภัยครับ AI ไม่สามารถอ่านภาพได้: {err_msg[:200]}")]
                     )
                 )
                 return
