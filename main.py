@@ -17,7 +17,6 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 app = FastAPI()
 
-# อนุญาตให้หน้าเว็บ LIFF (GitHub Pages) เรียกดึงข้อมูลได้
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,14 +25,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# หน่วยความจำเก็บข้อมูลบิลแบบ Real-time
 SLIP_CACHE: Dict[str, Any] = {}
+LATEST_SLIP: Dict[str, Any] = {}
 
 @app.get("/api/slip/{slip_id}")
 def get_slip(slip_id: str):
     if slip_id in SLIP_CACHE:
         return SLIP_CACHE[slip_id]
+    if LATEST_SLIP:
+        return LATEST_SLIP
     return {"status": "not_found", "items": []}
+
+@app.get("/api/latest-slip")
+def get_latest_slip():
+    if LATEST_SLIP:
+        return LATEST_SLIP
+    return {"status": "empty", "items": []}
 
 def get_available_gemini_models() -> list:
     if not GEMINI_KEY:
@@ -178,6 +185,7 @@ async def line_webhook(request: Request, bg: BackgroundTasks, x_line_signature: 
     return JSONResponse({"status": "ok"})
 
 async def handle_slip_image_reply(reply_token: str, message_id: str):
+    global LATEST_SLIP
     config = Configuration(access_token=LINE_TOKEN)
     async with AsyncApiClient(config) as api_client:
         msg_api = AsyncMessagingApi(api_client)
@@ -186,10 +194,10 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
             img_bytes = await blob_api.get_message_content(message_id)
             extracted_data = extract_receipt_with_gemini(img_bytes)
             
-            # 1. บันทึกข้อมูลลงใน Cache ของเซิร์ฟเวอร์
+            # บันทึกข้อมูลบิลทั้งตาม ID และบันทึกเป็นบิลล่าสุด
             SLIP_CACHE[message_id] = extracted_data
+            LATEST_SLIP = extracted_data
             
-            # 2. ส่งลิงก์ที่มีรหัส ID สั้นๆ ไปให้ LINE (ยาวเพียง 60 ตัวอักษร ไม่เกินโควตา 1,000 แน่นอน)
             dynamic_liff_url = f"{BASE_LIFF_URL}?id={message_id}"
             
             flex_content = build_receipt_flex(extracted_data, dynamic_liff_url)
@@ -199,6 +207,7 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
                     messages=[FlexMessage(alt_text="สรุปรายการตลาดสด aRest", contents=FlexContainer.from_dict(flex_content))]
                 )
             )
+            print(f"Replied successfully for slip {message_id}!", flush=True)
         except Exception as e:
             print(f"Reply error: {e}", flush=True)
 
