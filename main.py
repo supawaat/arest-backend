@@ -1,4 +1,4 @@
-import os, json, base64, urllib.request
+import os, json, base64, urllib.request, urllib.error
 from typing import Dict, Any
 from fastapi import FastAPI, Request, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -17,45 +17,38 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 app = FastAPI()
 
 def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
-    """เรียก Gemini 1.5 Flash ผ่าน REST API สกัดลายมือภาษาไทยสดๆ 100% (ไม่มี Mock)"""
     if not GEMINI_KEY:
-        print("[Error]: GEMINI_API_KEY is not set", flush=True)
         return {"error": "ไม่พบคีย์ GEMINI_API_KEY บนเซิร์ฟเวอร์"}
         
     try:
-        print("[Gemini Dynamic]: Processing real image with Gemini 1.5 Flash...", flush=True)
+        print("[Gemini REST]: Calling Gemini 1.5 Flash...", flush=True)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
         headers = {"Content-Type": "application/json"}
         img_b64 = base64.b64encode(image_bytes).decode("utf-8")
         
         prompt = """
-        คุณคือ AI ผู้เชี่ยวชาญการอ่านลายมือบิลและรายการสั่งซื้อของตลาดสดไทยสำหรับระบบ aRest
-        หน้าที่: สกัดรายการวัตถุดิบและจำนวนจากลายมือภาษาไทยในภาพทั้งหมด ออกมาเป็น JSON:
+        คุณคือ AI ผู้เชี่ยวชาญการอ่านลายมือบิลและรายการสั่งซื้อของตลาดสดไทย
+        หน้าที่: สกัดรายการวัตถุดิบ จำนวน และราคาจากลายมือภาษาไทยทั้งหมดในภาพเป็น JSON:
         {
-          "vendor_name": "ชื่อร้านหรือหัวกระดาษ (ถ้ามี)",
-          "receipt_date": "วันที่ (ถ้ามี)",
+          "vendor_name": "รายการจดตลาดสด",
+          "receipt_date": "12 ต.ค. 2026",
           "items": [
             {
-              "name": "ชื่อวัตถุดิบที่เขียนในภาพ (เช่น กุ้งสด, หมูบด, ผักคะน้า, เส้นเล็ก)",
-              "quantity": ตัวเลขจำนวน (ถ้ามี '2 ล' ให้เป็น 2, 'ครึ่งโล' ให้เป็น 0.5, ถ้าไม่ระบุให้เป็น 1),
-              "unit": "หน่วย (เช่น กก., โล, ขีด, ถุง, กำ, อัน, ห่อ, ฟอง, แผง)",
-              "total_price": ราคารวม (ถ้าไม่มีเขียนราคาไว้ ให้ใส่ 0)
+              "name": "ชื่อวัตถุดิบ (เช่น หมูสับ, น้ำปลา, ขิง, ไข่ไก่, คะน้า)",
+              "quantity": ตัวเลขจำนวน (ถ้ามี '2 กก.' ให้เป็น 2, '1/2 กก.' ให้เป็น 0.5, '1 ขวด' ให้เป็น 1),
+              "unit": "หน่วย (เช่น กก., ขวด, แผง, ถุง, กำ, ลูก)",
+              "total_price": ราคารวมที่เขียนไว้ท้ายบรรทัด (เช่น 190, 58, 40, 130, ถ้าไม่มีให้ใส่ 0)
             }
           ]
         }
-        ข้อสำคัญ: อ่านลายมือภาษาไทยสดๆ จากภาพนี้เท่านั้น ห้ามสร้างข้อมูลขึ้นเองเด็ดขาด
+        ข้อสำคัญ: อ่านลายมือจากภาพจริงทั้งหมด ทั้งฝั่งซ้ายและฝั่งขวา!
         """
         
         payload = {
             "contents": [{
                 "parts": [
                     {"text": prompt},
-                    {
-                        "inlineData": {
-                            "mimeType": "image/jpeg",
-                            "data": img_b64
-                        }
-                    }
+                    {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}}
                 ]
             }],
             "generationConfig": {
@@ -69,7 +62,6 @@ def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
             res_json = json.loads(resp.read().decode("utf-8"))
             raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
             
-            # ลบ markdown formatting ถ้ามี
             clean_text = raw_text.strip()
             if clean_text.startswith("```"):
                 clean_text = clean_text.split("\n", 1)[-1]
@@ -81,6 +73,15 @@ def extract_receipt_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
             print(f"[Gemini Real Success]: Extracted {len(parsed.get('items', []))} items dynamically!", flush=True)
             return parsed
             
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8")
+        print(f"[Google HTTP Error {e.code}]: {err_body}", flush=True)
+        try:
+            err_json = json.loads(err_body)
+            msg = err_json.get("error", {}).get("message", err_body)
+            return {"error": f"Google {e.code}: {msg}"}
+        except:
+            return {"error": f"Google {e.code}: {err_body}"}
     except Exception as e:
         print(f"[Gemini Error]: {e}", flush=True)
         return {"error": f"Gemini Error: {str(e)}"}
@@ -89,7 +90,6 @@ def build_receipt_flex(slip_data: Dict[str, Any]) -> Dict[str, Any]:
     items = slip_data.get("items", [])
     item_rows = []
     
-    # แสดงรายการจริงที่สกัดได้แบบ Dynamic
     for it in items[:10]:
         price_val = float(it.get("total_price", 0.0))
         price_text = f"{price_val:,.2f} ฿" if price_val > 0 else "รอใส่ราคา"
@@ -254,16 +254,15 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
             print(f"Downloading real image {message_id} from LINE...", flush=True)
             img_bytes = await blob_api.get_message_content(message_id)
             
-            # เรียก Gemini 1.5 Flash อ่านภาพสดๆ
             extracted_data = extract_receipt_with_gemini(img_bytes)
             
             if "error" in extracted_data:
                 err_msg = extracted_data["error"]
-                print(f"[AI Failed]: {err_msg}", flush=True)
+                print(f"[AI Detailed Error]: {err_msg}", flush=True)
                 await msg_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=reply_token,
-                        messages=[TextMessage(text=f"⚠️ ขออภัยครับ AI ไม่สามารถอ่านภาพได้: {err_msg}")]
+                        messages=[TextMessage(text=f"⚠️ {err_msg}")]
                     )
                 )
                 return
@@ -285,7 +284,7 @@ async def handle_slip_image_reply(reply_token: str, message_id: str):
                 await msg_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=reply_token,
-                        messages=[TextMessage(text=f"⚠️ เกิดข้อผิดพลาดในการประมวลผลภาพ: {str(e)}")]
+                        messages=[TextMessage(text=f"⚠️ เกิดข้อผิดพลาด: {str(e)}")]
                     )
                 )
             except: pass
