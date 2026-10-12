@@ -10,13 +10,13 @@ from linebot.v3.messaging import (
     AsyncApiClient, AsyncMessagingApi, AsyncMessagingApiBlob,
     Configuration, ReplyMessageRequest, ImageMessage, FlexMessage, FlexContainer, TextMessage
 )
-from linebot.v3.webhooks import MessageEvent, ImageMessageContent
+from linebot.v3.webhooks import MessageEvent, ImageMessageContent, TextMessageContent
 import google.generativeai as genai
 
-LINE_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
-LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-LIFF_URL = os.getenv("LIFF_URL", "")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+LINE_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
+LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+LIFF_URL = os.getenv("LIFF_URL", "").strip()
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
@@ -32,7 +32,6 @@ def render_eslip(data: Dict[str, Any], out_path: str):
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([24, 24, w-24, h-24], radius=36, fill="#FFFFFF")
     
-    # Header
     draw.rounded_rectangle([68, 60, 180, 114], radius=14, fill="#2563EB")
     draw.text((86, 75), "aRest", fill="#FFFFFF")
     draw.text((200, 70), "Receipt Summary", fill="#0F172A")
@@ -40,12 +39,10 @@ def render_eslip(data: Dict[str, Any], out_path: str):
     draw.text((68, 140), f"Store: {data.get('store', 'My Restaurant')}", fill="#0F172A")
     draw.text((68, 185), f"Vendor: {data.get('vendor', 'Wet Market')}", fill="#64748B")
     
-    # Hero Total
     draw.rounded_rectangle([60, 240, w-60, 410], radius=24, fill="#F8FAFC", outline="#E2E8F0", width=2)
     draw.text((92, 265), "Total Amount", fill="#475569")
     draw.text((92, 315), f"{data.get('total', 0):,.2f} THB", fill="#0F172A")
     
-    # Items
     draw.text((68, 450), "Extracted Items:", fill="#0F172A")
     y = 500
     for it in data.get("items", [])[:4]:
@@ -77,41 +74,57 @@ def extract_with_gemini(image_bytes: bytes) -> Dict[str, Any]:
         ])
         return json.loads(response.text)
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"[Gemini Error]: {e}", flush=True)
         return None
 
 @app.post("/webhook")
 async def line_webhook(request: Request, bg: BackgroundTasks, x_line_signature: str = Header(None)):
     body = (await request.body()).decode("utf-8")
-    
     host = request.headers.get("host", "arest-backend.onrender.com")
     https_host_url = f"https://{host}"
     
-    # 1. ลองถอดรหัสผ่าน WebhookParser ตามปกติ
-    events = []
-    if LINE_SECRET:
-        try:
-            parser = WebhookParser(LINE_SECRET)
-            events = parser.parse(body, x_line_signature)
-        except Exception as e:
-            print(f"Signature check skipped/warning: {e}")
-            events = []
+    print(f"[Webhook Event Received] Body length: {len(body)}", flush=True)
+    
+    # 1. ดึงเหตุการณ์จาก LINE
+    try:
+        payload = json.loads(body)
+        for ev in payload.get("events", []):
+            reply_token = ev.get("replyToken")
+            msg_obj = ev.get("message", {})
+            msg_type = msg_obj.get("type")
+            msg_id = msg_obj.get("id")
             
-    # 2. ถ้ารหัสลายเซ็นไม่ผ่าน ให้ดึง JSON ตรงๆ เพื่อไม่ให้การทำงานสะดุด (Fallback)
-    if not events:
-        try:
-            payload = json.loads(body)
-            for ev in payload.get("events", []):
-                if ev.get("type") == "message" and ev.get("message", {}).get("type") == "image":
-                    reply_token = ev.get("replyToken")
-                    msg_id = ev.get("message", {}).get("id")
-                    if reply_token and msg_id:
-                        print(f"Handling image event (via fallback) msg_id: {msg_id}")
-                        bg.add_task(handle_slip_image, reply_token, msg_id, https_host_url)
-        except Exception as err:
-            print(f"Fallback parse error: {err}")
+            # ตอบกลับข้อความตัวหนังสือ
+            if msg_type == "text":
+                text_content = msg_obj.get("text", "")
+                print(f"[Text Message]: {text_content}", flush=True)
+                bg.add_task(handle_text_reply, reply_token, text_content)
+                
+            # ตอบกลับรูปภาพบิล
+            elif msg_type == "image":
+                print(f"[Image Message] ID: {msg_id}", flush=True)
+                bg.add_task(handle_slip_image, reply_token, msg_id, https_host_url)
+    except Exception as e:
+        print(f"[Webhook Error]: {e}", flush=True)
 
     return JSONResponse({"status": "ok"})
+
+async def handle_text_reply(reply_token: str, user_text: str):
+    config = Configuration(access_token=LINE_TOKEN)
+    async with AsyncApiClient(config) as api_client:
+        msg_api = AsyncMessagingApi(api_client)
+        try:
+            print(f"Replying to text with token: {reply_token[:10]}...", flush=True)
+            reply_text = "👋 สวัสดีครับ! aRest Bot พร้อมทำงานแล้วครับ\n\n📸 กรุณาส่งรูปถ่ายบิลตลาดสดเข้ามาได้เลยครับ ระบบจะอ่านบิลและสรุปต้นทุนให้ทันที!"
+            await msg_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
+            print("Text reply sent successfully!", flush=True)
+        except Exception as e:
+            print(f"Failed to reply text: {e}", flush=True)
 
 async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
     config = Configuration(access_token=LINE_TOKEN)
@@ -120,7 +133,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
         blob_api = AsyncMessagingApiBlob(api_client)
         
         try:
-            print(f"Downloading image {message_id} from LINE...")
+            print(f"Downloading image {message_id} from LINE...", flush=True)
             img_bytes = await blob_api.get_message_content(message_id)
             gemini_result = extract_with_gemini(img_bytes)
             
@@ -160,7 +173,7 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
             png_path = os.path.join(CACHE_DIR, png_name)
             render_eslip(slip_data, png_path)
             img_url = f"{host_url}/slips/{png_name}"
-            print(f"Generated E-Slip: {img_url}")
+            print(f"Generated E-Slip URL: {img_url}", flush=True)
             
             card = {
                 "type": "bubble", "size": "mega",
@@ -193,10 +206,10 @@ async def handle_slip_image(reply_token: str, message_id: str, host_url: str):
                     ]
                 )
             )
-            print(f"Successfully replied to LINE user!")
+            print("Successfully replied image to LINE user!", flush=True)
             
         except Exception as e:
-            print(f"Error in handle_slip_image: {e}")
+            print(f"Error in handle_slip_image: {e}", flush=True)
             await msg_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
